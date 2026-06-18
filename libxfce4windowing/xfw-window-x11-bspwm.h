@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022 Brian Tarricone <brian@tarricone.org>
+ * Copyright (c) 2024 Brian Tarricone <brian@tarricone.org>
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -17,31 +17,22 @@
  * MA 02110-1301 USA
  */
 
-#ifndef __XFW_SCREEN_X11_H__
-#define __XFW_SCREEN_X11_H__
+#ifndef __XFW_WINDOW_X11_BSPWM_H__
+#define __XFW_WINDOW_X11_BSPWM_H__
 
 #if !defined(__LIBXFCE4WINDOWING_H_INSIDE__) && !defined(LIBXFCE4WINDOWING_COMPILATION)
 #error "Only libxfce4windowing.h can be included directly"
 #endif
 
 #include <glib-object.h>
-#include <libwnck/libwnck.h>
 
-#include "xfw-screen-private.h"
-#include "xfw-workspace.h"
+#include "xfw-window-x11.h"
 
 G_BEGIN_DECLS
 
-#define XFW_TYPE_SCREEN_X11 (xfw_screen_x11_get_type())
-G_DECLARE_FINAL_TYPE(XfwScreenX11, xfw_screen_x11, XFW, SCREEN_X11, XfwScreen)
-
-XfwWorkspace *_xfw_screen_x11_workspace_for_wnck_workspace(XfwScreenX11 *screen, WnckWorkspace *wnck_workspace);
-
-GArray *_xfw_screen_x11_get_workareas(XfwScreenX11 *screen);
-void _xfw_screen_x11_set_workareas(XfwScreenX11 *screen, GArray *workareas);
-
-gboolean _xfw_screen_x11_is_bspwm(XfwScreenX11 *screen);
+#define XFW_TYPE_WINDOW_X11_BSPWM (xfw_window_x11_bspwm_get_type())
+G_DECLARE_FINAL_TYPE(XfwWindowX11Bspwm, xfw_window_x11_bspwm, XFW, WINDOW_X11_BSPWM, XfwWindowX11)
 
 G_END_DECLS
 
-#endif /* __XFW_SCREEN_X11_H__ */
+#endif /* __XFW_WINDOW_X11_BSPWM_H__ */

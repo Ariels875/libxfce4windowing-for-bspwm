@@ -31,7 +31,9 @@
 #include "xfw-screen-x11.h"
 #include "xfw-util.h"
 #include "xfw-window-x11.h"
+#include "xfw-window-x11-bspwm.h"
 #include "xfw-workspace-manager-x11.h"
+#include "xfw-window-private.h"
 
 struct _XfwScreenX11 {
     XfwScreen parent;
@@ -40,11 +42,19 @@ struct _XfwScreenX11 {
     GList *windows;
     GList *windows_stacked;
     GHashTable *wnck_windows;
+    GHashTable *xid_windows;  // Maps XID -> XfwWindowX11 for bspwm events
 
     // _NET_WORKAREA is defined for each workspace
     GArray *workareas;  // GdkRectangle
 
     XfwMonitorManagerX11 *monitor_manager;
+
+    gboolean is_bspwm;
+
+    // bspwm event subscription
+    GSubprocess *bspc_subscribe;
+    GIOChannel *bspc_stdout;
+    guint bspc_watch_id;
 };
 
 static void xfw_screen_x11_constructed(GObject *obj);
@@ -80,6 +90,47 @@ xfw_screen_x11_class_init(XfwScreenX11Class *klass) {
 static void
 xfw_screen_x11_init(XfwScreenX11 *screen) {}
 
+static gboolean
+xfw_screen_x11_detect_bspwm(XfwScreenX11 *xscreen) {
+    Display *display = GDK_DISPLAY_XDISPLAY(gdk_screen_get_display(_xfw_screen_get_gdk_screen(XFW_SCREEN(xscreen))));
+    Window root = gdk_x11_screen_get_root_window(_xfw_screen_get_gdk_screen(XFW_SCREEN(xscreen)));
+
+    Atom supporting_wm_check = XInternAtom(display, "_NET_SUPPORTING_WM_CHECK", False);
+    Atom actual_type;
+    int actual_format;
+    unsigned long n_items, bytes_after;
+    unsigned char *prop_data = NULL;
+
+    // Get _NET_SUPPORTING_WM_CHECK from root window
+    if (XGetWindowProperty(display, root, supporting_wm_check, 0, 1, False, XA_WINDOW,
+                           &actual_type, &actual_format, &n_items, &bytes_after, &prop_data) == Success
+        && prop_data != NULL && n_items > 0) {
+        Window wm_window = *(Window *)prop_data;
+        XFree(prop_data);
+
+        // Get _NET_WM_NAME from the WM window
+        Atom net_wm_name = XInternAtom(display, "_NET_WM_NAME", False);
+        Atom utf8_string = XInternAtom(display, "UTF8_STRING", False);
+
+        if (XGetWindowProperty(display, wm_window, net_wm_name, 0, 1024, False, utf8_string,
+                               &actual_type, &actual_format, &n_items, &bytes_after, &prop_data) == Success
+            && prop_data != NULL && n_items > 0) {
+            gchar *wm_name = g_strndup((gchar *)prop_data, n_items);
+            XFree(prop_data);
+
+            gboolean is_bspwm = (g_strcmp0(wm_name, "bspwm") == 0);
+            g_free(wm_name);
+            return is_bspwm;
+        }
+    }
+
+    if (prop_data != NULL) {
+        XFree(prop_data);
+    }
+
+    return FALSE;
+}
+
 static void
 xfw_screen_x11_constructed(GObject *obj) {
     XfwScreen *screen = XFW_SCREEN(obj);
@@ -98,14 +149,28 @@ xfw_screen_x11_constructed(GObject *obj) {
     xscreen->wnck_screen = g_object_ref(wnck_screen_get(gdk_x11_screen_get_screen_number(_xfw_screen_get_gdk_screen(screen))));
     G_GNUC_END_IGNORE_DEPRECATIONS
     xscreen->wnck_windows = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, g_object_unref);
+    xscreen->xid_windows = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, NULL);
+
+    // Detect if we're running under bspwm
+    xscreen->is_bspwm = xfw_screen_x11_detect_bspwm(xscreen);
+
+    if (xscreen->is_bspwm) {
+        xfw_screen_x11_start_bspc_subscription(xscreen);
+    }
 
     for (GList *l = wnck_screen_get_windows(xscreen->wnck_screen); l != NULL; l = l->next) {
-        XfwWindowX11 *window = g_object_new(XFW_TYPE_WINDOW_X11,
+        GType window_type = xscreen->is_bspwm ? XFW_TYPE_WINDOW_X11_BSPWM : XFW_TYPE_WINDOW_X11;
+        XfwWindowX11 *window = g_object_new(window_type,
                                             "screen", screen,
                                             "wnck-window", l->data,
                                             NULL);
         xscreen->windows = g_list_prepend(xscreen->windows, window);
         g_hash_table_insert(xscreen->wnck_windows, l->data, window);
+        
+        Window xid = wnck_window_get_xid(WNCK_WINDOW(l->data));
+        if (xid != 0) {
+            g_hash_table_insert(xscreen->xid_windows, GUINT_TO_POINTER(xid), window);
+        }
     }
     xscreen->windows = g_list_reverse(xscreen->windows);
     window_stacking_changed(xscreen->wnck_screen, xscreen);
@@ -125,9 +190,121 @@ xfw_screen_x11_constructed(GObject *obj) {
     xscreen->monitor_manager = _xfw_monitor_manager_x11_new(xscreen);
 }
 
+static gboolean
+xfw_screen_x11_bspc_event_callback(GIOChannel *channel, GIOCondition condition, XfwScreenX11 *screen);
+
+static void
+xfw_screen_x11_start_bspc_subscription(XfwScreenX11 *screen) {
+    GError *error = NULL;
+    gchar *argv[] = { "bspc", "subscribe", "node_state", "node_flag", NULL };
+    gchar **envp = g_get_environ();
+
+    GSubprocess *subprocess = g_subprocess_newv((const gchar *const *)argv,
+                                                G_SUBPROCESS_FLAGS_STDOUT_PIPE |
+                                                G_SUBPROCESS_FLAGS_STDERR_SILENCE,
+                                                &error);
+    g_strfreev(envp);
+
+    if (subprocess == NULL) {
+        g_warning("Failed to start bspc subscription: %s", error->message);
+        g_error_free(error);
+        return;
+    }
+
+    screen->bspc_subscribe = subprocess;
+
+    gint stdout_fd = g_subprocess_get_stdout_pipe(subprocess);
+    if (stdout_fd >= 0) {
+        screen->bspc_stdout = g_io_channel_unix_new(stdout_fd);
+        g_io_channel_set_encoding(screen->bspc_stdout, NULL, NULL);
+        g_io_channel_set_flags(screen->bspc_stdout, G_IO_FLAG_NONBLOCK, NULL);
+        screen->bspc_watch_id = g_io_add_watch(screen->bspc_stdout,
+                                               G_IO_IN | G_IO_HUP | G_IO_ERR,
+                                               (GIOFunc)xfw_screen_x11_bspc_event_callback,
+                                               screen);
+    }
+}
+
+static void
+xfw_screen_x11_stop_bspc_subscription(XfwScreenX11 *screen) {
+    if (screen->bspc_watch_id > 0) {
+        g_source_remove(screen->bspc_watch_id);
+        screen->bspc_watch_id = 0;
+    }
+    if (screen->bspc_stdout != NULL) {
+        g_io_channel_unref(screen->bspc_stdout);
+        screen->bspc_stdout = NULL;
+    }
+    if (screen->bspc_subscribe != NULL) {
+        g_subprocess_force_exit(screen->bspc_subscribe);
+        g_object_unref(screen->bspc_subscribe);
+        screen->bspc_subscribe = NULL;
+    }
+}
+
+static gboolean
+xfw_screen_x11_bspc_event_callback(GIOChannel *channel, GIOCondition condition, XfwScreenX11 *screen) {
+    if (condition & (G_IO_HUP | G_IO_ERR)) {
+        // Connection closed or error, try to restart
+        xfw_screen_x11_stop_bspc_subscription(screen);
+        xfw_screen_x11_start_bspc_subscription(screen);
+        return G_SOURCE_REMOVE;
+    }
+
+    if (condition & G_IO_IN) {
+        gchar *line = NULL;
+        gsize length = 0;
+        GError *error = NULL;
+        GIOStatus status = g_io_channel_read_line(channel, &line, &length, NULL, &error);
+
+        if (status == G_IO_STATUS_NORMAL && line != NULL) {
+            // Parse bspc event: node_state <xid> hidden on|off or node_flag <xid> hidden on|off
+            gchar **parts = g_strsplit(line, " ", -1);
+            if (g_strv_length(parts) >= 4) {
+                if (g_strcmp0(parts[0], "node_state") == 0 || g_strcmp0(parts[0], "node_flag") == 0) {
+                    if (g_strcmp0(parts[2], "hidden") == 0) {
+                        Window xid = (Window)g_ascii_strtoull(parts[1] + 2, NULL, 16); // Skip "0x"
+                        gboolean hidden = (g_strcmp0(parts[3], "on") == 0);
+
+                        XfwWindowX11 *window = g_hash_table_lookup(screen->xid_windows, GUINT_TO_POINTER(xid));
+                        if (window != NULL) {
+                            XfwWindowState old_state = window->priv->state;
+                            XfwWindowState new_state = old_state;
+                            if (hidden) {
+                                new_state |= XFW_WINDOW_STATE_MINIMIZED;
+                            } else {
+                                new_state &= ~XFW_WINDOW_STATE_MINIMIZED;
+                            }
+                            XfwWindowState changed_mask = old_state ^ new_state;
+                            if (changed_mask != XFW_WINDOW_STATE_NONE) {
+                                window->priv->state = new_state;
+                                g_object_notify(G_OBJECT(window), "state");
+                                g_signal_emit_by_name(window, "state-changed", changed_mask, new_state);
+                            }
+                        }
+                    }
+                }
+            }
+            g_strfreev(parts);
+            g_free(line);
+        } else if (status == G_IO_STATUS_EOF) {
+            // EOF, restart subscription
+            xfw_screen_x11_stop_bspc_subscription(screen);
+            xfw_screen_x11_start_bspc_subscription(screen);
+        } else if (error != NULL) {
+            g_warning("Error reading bspc events: %s", error->message);
+            g_error_free(error);
+        }
+    }
+
+    return G_SOURCE_CONTINUE;
+}
+
 static void
 xfw_screen_x11_finalize(GObject *obj) {
     XfwScreenX11 *screen = XFW_SCREEN_X11(obj);
+
+    xfw_screen_x11_stop_bspc_subscription(screen);
 
     _xfw_monitor_manager_x11_destroy(screen->monitor_manager);
 
@@ -135,6 +312,7 @@ xfw_screen_x11_finalize(GObject *obj) {
     g_list_free(screen->windows);
     g_list_free(screen->windows_stacked);
     g_hash_table_destroy(screen->wnck_windows);
+    g_hash_table_destroy(screen->xid_windows);
 
     if (screen->workareas != NULL) {
         g_array_free(screen->workareas, TRUE);
@@ -167,12 +345,19 @@ xfw_screen_x11_set_show_desktop(XfwScreen *screen, gboolean show) {
 
 static void
 window_opened(WnckScreen *wnck_screen, WnckWindow *wnck_window, XfwScreenX11 *screen) {
-    XfwWindowX11 *window = XFW_WINDOW_X11(g_object_new(XFW_TYPE_WINDOW_X11,
+    GType window_type = screen->is_bspwm ? XFW_TYPE_WINDOW_X11_BSPWM : XFW_TYPE_WINDOW_X11;
+    XfwWindowX11 *window = XFW_WINDOW_X11(g_object_new(window_type,
                                                        "screen", screen,
                                                        "wnck-window", wnck_window,
                                                        NULL));
     screen->windows = g_list_prepend(screen->windows, window);
     g_hash_table_insert(screen->wnck_windows, wnck_window, window);
+
+    Window xid = wnck_window_get_xid(wnck_window);
+    if (xid != 0) {
+        g_hash_table_insert(screen->xid_windows, GUINT_TO_POINTER(xid), window);
+    }
+
     // FIXME: window-stacking-changed signal will fire out of order
     window_stacking_changed(screen->wnck_screen, screen);
     g_signal_emit_by_name(screen, "window-opened", window);
@@ -183,6 +368,11 @@ window_closed(WnckScreen *wnck_screen, WnckWindow *wnck_window, XfwScreenX11 *sc
     XfwWindowX11 *window = g_hash_table_lookup(screen->wnck_windows, wnck_window);
     if (window != NULL) {
         g_object_ref(window);
+
+        Window xid = wnck_window_get_xid(wnck_window);
+        if (xid != 0) {
+            g_hash_table_remove(screen->xid_windows, GUINT_TO_POINTER(xid));
+        }
 
         g_hash_table_remove(screen->wnck_windows, wnck_window);
         screen->windows = g_list_remove(screen->windows, window);
@@ -268,4 +458,9 @@ _xfw_screen_x11_set_workareas(XfwScreenX11 *screen, GArray *workareas) {
         g_array_free(screen->workareas, TRUE);
     }
     screen->workareas = workareas;
+}
+
+gboolean
+_xfw_screen_x11_is_bspwm(XfwScreenX11 *screen) {
+    return screen->is_bspwm;
 }

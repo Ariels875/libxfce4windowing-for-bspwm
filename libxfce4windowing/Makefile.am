@@ -53,6 +53,8 @@ libxfce4windowing_0_x11_sources = \
 	xfw-screen-x11.h \
 	xfw-window-x11.c \
 	xfw-window-x11.h \
+	xfw-window-x11-bspwm.c \
+	xfw-window-x11-bspwm.h \
 	xfw-wnck-icon.c \
 	xfw-wnck-icon.h \
 	xfw-workspace-manager-x11.c \
