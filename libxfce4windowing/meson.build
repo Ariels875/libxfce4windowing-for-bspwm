@@ -61,16 +61,14 @@ if enable_x11
     'xfw-monitor-x11.c',
     'xfw-screen-x11.c',
     'xfw-window-x11.c',
-    'xfw-window-x11-bspwm.c',
+    'xfw-window-x11-bspwm.c',   # ← solo el .c aquí (privado)
     'xfw-wnck-icon.c',
     'xfw-workspace-manager-x11.c',
     'xfw-workspace-x11.c',
     'xsettings-x11.c',
   ]
-  windowing_public_sources += [
-    'xfw-window-x11.c',
-    'xfw-window-x11-bspwm.h',
-  ]
+  # windowing_public_sources NO debe tocar archivos privados del backend X11.
+  # El bloque += que el agente generó debe eliminarse completamente.
 else
   windowing_config_data.set('LIBXFCE4WINDOWING_HAS_X11', '/* #undef LIBXFCE4WINDOWING_HAS_X11 */')
 endif

@@ -23,6 +23,7 @@
 
 #include <X11/X.h>
 #include <gdk/gdkx.h>
+#include <gio/gunixinputstream.h>  /* FIX #1: necesario para g_unix_input_stream_get_fd() */
 #include <libwnck/libwnck.h>
 
 #include "libxfce4windowing-private.h"
@@ -42,21 +43,23 @@ struct _XfwScreenX11 {
     GList *windows;
     GList *windows_stacked;
     GHashTable *wnck_windows;
-    GHashTable *xid_windows;  // Maps XID -> XfwWindowX11 for bspwm events
+    GHashTable *xid_windows;  /* Maps XID -> XfwWindowX11 for bspwm events */
 
-    // _NET_WORKAREA is defined for each workspace
-    GArray *workareas;  // GdkRectangle
+    /* _NET_WORKAREA is defined for each workspace */
+    GArray *workareas;  /* GdkRectangle */
 
     XfwMonitorManagerX11 *monitor_manager;
 
     gboolean is_bspwm;
 
-    // bspwm event subscription
+    /* bspwm event subscription */
     GSubprocess *bspc_subscribe;
-    GIOChannel *bspc_stdout;
-    guint bspc_watch_id;
+    GIOChannel  *bspc_stdout;
+    guint        bspc_watch_id;
 };
 
+/* Forward declarations — todas las funciones estáticas que se referencian
+ * antes de su definición deben declararse aquí. */
 static void xfw_screen_x11_constructed(GObject *obj);
 static void xfw_screen_x11_finalize(GObject *obj);
 static GList *xfw_screen_x11_get_windows(XfwScreen *screen);
@@ -70,6 +73,14 @@ static void window_stacking_changed(WnckScreen *wnck_screen, XfwScreenX11 *scree
 static void showing_desktop_changed(WnckScreen *wnck_screen, XfwScreenX11 *screen);
 static void window_manager_changed(WnckScreen *wnck_screen, XfwScreenX11 *screen);
 static void active_workspace_changed(WnckScreen *wnck_screen, WnckWorkspace *previous_workspace, XfwScreenX11 *screen);
+
+/* FIX #1 (forward declarations de las funciones bspwm que se usan en
+ * xfw_screen_x11_constructed antes de estar definidas): */
+static void xfw_screen_x11_start_bspc_subscription(XfwScreenX11 *screen);
+static void xfw_screen_x11_stop_bspc_subscription(XfwScreenX11 *screen);
+static gboolean xfw_screen_x11_bspc_event_callback(GIOChannel *channel,
+                                                    GIOCondition condition,
+                                                    XfwScreenX11 *screen);
 
 
 G_DEFINE_FINAL_TYPE(XfwScreenX11, xfw_screen_x11, XFW_TYPE_SCREEN)
@@ -101,14 +112,15 @@ xfw_screen_x11_detect_bspwm(XfwScreenX11 *xscreen) {
     unsigned long n_items, bytes_after;
     unsigned char *prop_data = NULL;
 
-    // Get _NET_SUPPORTING_WM_CHECK from root window
+    /* Get _NET_SUPPORTING_WM_CHECK from root window */
     if (XGetWindowProperty(display, root, supporting_wm_check, 0, 1, False, XA_WINDOW,
                            &actual_type, &actual_format, &n_items, &bytes_after, &prop_data) == Success
         && prop_data != NULL && n_items > 0) {
         Window wm_window = *(Window *)prop_data;
         XFree(prop_data);
+        prop_data = NULL;
 
-        // Get _NET_WM_NAME from the WM window
+        /* Get _NET_WM_NAME from the WM window */
         Atom net_wm_name = XInternAtom(display, "_NET_WM_NAME", False);
         Atom utf8_string = XInternAtom(display, "UTF8_STRING", False);
 
@@ -149,12 +161,14 @@ xfw_screen_x11_constructed(GObject *obj) {
     xscreen->wnck_screen = g_object_ref(wnck_screen_get(gdk_x11_screen_get_screen_number(_xfw_screen_get_gdk_screen(screen))));
     G_GNUC_END_IGNORE_DEPRECATIONS
     xscreen->wnck_windows = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, g_object_unref);
-    xscreen->xid_windows = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, NULL);
+    xscreen->xid_windows  = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, NULL);
 
-    // Detect if we're running under bspwm
+    /* Detect if we're running under bspwm */
     xscreen->is_bspwm = xfw_screen_x11_detect_bspwm(xscreen);
 
     if (xscreen->is_bspwm) {
+        /* Las forward declarations de arriba hacen que esta llamada sea válida
+         * aunque la definición esté más abajo en el archivo. */
         xfw_screen_x11_start_bspc_subscription(xscreen);
     }
 
@@ -166,10 +180,13 @@ xfw_screen_x11_constructed(GObject *obj) {
                                             NULL);
         xscreen->windows = g_list_prepend(xscreen->windows, window);
         g_hash_table_insert(xscreen->wnck_windows, l->data, window);
-        
+
         Window xid = wnck_window_get_xid(WNCK_WINDOW(l->data));
         if (xid != 0) {
-            g_hash_table_insert(xscreen->xid_windows, GUINT_TO_POINTER(xid), window);
+            /* FIX #4: GSIZE_TO_POINTER en lugar de GUINT_TO_POINTER.
+             * Window es typedef unsigned long (8 bytes en x86-64).
+             * GUINT_TO_POINTER solo preserva 32 bits y trunca XIDs en 64-bit. */
+            g_hash_table_insert(xscreen->xid_windows, GSIZE_TO_POINTER((gsize)xid), window);
         }
     }
     xscreen->windows = g_list_reverse(xscreen->windows);
@@ -179,43 +196,64 @@ xfw_screen_x11_constructed(GObject *obj) {
                                   g_hash_table_lookup(xscreen->wnck_windows,
                                                       wnck_screen_get_active_window(xscreen->wnck_screen)));
 
-    g_signal_connect(xscreen->wnck_screen, "window-opened", G_CALLBACK(window_opened), xscreen);
-    g_signal_connect(xscreen->wnck_screen, "window-closed", G_CALLBACK(window_closed), xscreen);
-    g_signal_connect(xscreen->wnck_screen, "active-window-changed", G_CALLBACK(active_window_changed), xscreen);
+    g_signal_connect(xscreen->wnck_screen, "window-opened",           G_CALLBACK(window_opened),           xscreen);
+    g_signal_connect(xscreen->wnck_screen, "window-closed",           G_CALLBACK(window_closed),           xscreen);
+    g_signal_connect(xscreen->wnck_screen, "active-window-changed",   G_CALLBACK(active_window_changed),   xscreen);
     g_signal_connect(xscreen->wnck_screen, "window-stacking-changed", G_CALLBACK(window_stacking_changed), xscreen);
-    g_signal_connect(xscreen->wnck_screen, "window-manager-changed", G_CALLBACK(window_manager_changed), xscreen);
+    g_signal_connect(xscreen->wnck_screen, "window-manager-changed",  G_CALLBACK(window_manager_changed),  xscreen);
     g_signal_connect(xscreen->wnck_screen, "showing-desktop-changed", G_CALLBACK(showing_desktop_changed), xscreen);
-    g_signal_connect(xscreen->wnck_screen, "active-workspace-changed", G_CALLBACK(active_workspace_changed), xscreen);
+    g_signal_connect(xscreen->wnck_screen, "active-workspace-changed",G_CALLBACK(active_workspace_changed),xscreen);
 
     xscreen->monitor_manager = _xfw_monitor_manager_x11_new(xscreen);
 }
 
-static gboolean
-xfw_screen_x11_bspc_event_callback(GIOChannel *channel, GIOCondition condition, XfwScreenX11 *screen);
+/* ---------------------------------------------------------------------------
+ * bspwm: suscripción a eventos de bspc subscribe
+ * ---------------------------------------------------------------------------
+ *
+ * La arquitectura es:
+ *   1. start_bspc_subscription  — lanza "bspc subscribe node_state node_flag"
+ *                                  y conecta un GIOChannel a su stdout.
+ *   2. bspc_event_callback      — lee cada línea, parsea el evento y actualiza
+ *                                  el XfwWindowState del XfwWindowX11 afectado.
+ *   3. stop_bspc_subscription   — mata el proceso y libera recursos.
+ */
 
 static void
 xfw_screen_x11_start_bspc_subscription(XfwScreenX11 *screen) {
     GError *error = NULL;
-    gchar *argv[] = { "bspc", "subscribe", "node_state", "node_flag", NULL };
-    gchar **envp = g_get_environ();
+    /* argv estático: g_subprocess_newv NO toma ownership, no hace falta heap */
+    const gchar *argv[] = { "bspc", "subscribe", "node_state", "node_flag", NULL };
 
-    GSubprocess *subprocess = g_subprocess_newv((const gchar *const *)argv,
+    /* FIX #1 (parte 1/2): eliminamos la variable envp que se obtenía con
+     * g_get_environ() y se liberaba sin pasarse a nadie.
+     * g_subprocess_newv hereda el entorno del proceso padre por defecto. */
+    GSubprocess *subprocess = g_subprocess_newv(argv,
                                                 G_SUBPROCESS_FLAGS_STDOUT_PIPE |
                                                 G_SUBPROCESS_FLAGS_STDERR_SILENCE,
                                                 &error);
-    g_strfreev(envp);
 
     if (subprocess == NULL) {
-        g_warning("Failed to start bspc subscription: %s", error->message);
+        g_warning("xfw-screen-x11: failed to start bspc subscription: %s", error->message);
         g_error_free(error);
         return;
     }
 
     screen->bspc_subscribe = subprocess;
 
-    gint stdout_fd = g_subprocess_get_stdout_pipe(subprocess);
-    if (stdout_fd >= 0) {
+    /* FIX #1 (parte 2/2): g_subprocess_get_stdout_pipe() retorna GInputStream*,
+     * NO un gint fd. Para obtener el fd Unix subyacente usamos
+     * g_unix_input_stream_get_fd() sobre el GUnixInputStream que GSubprocess
+     * crea internamente cuando se pide STDOUT_PIPE.
+     *
+     * IMPORTANTE: el fd sigue siendo propiedad de GSubprocess; NO llamar a
+     * g_io_channel_set_close_on_unref(TRUE) porque causaría un doble cierre
+     * al destruir el GSubprocess. */
+    GInputStream *stdout_stream = g_subprocess_get_stdout_pipe(subprocess);
+    if (stdout_stream != NULL) {
+        gint stdout_fd = g_unix_input_stream_get_fd(G_UNIX_INPUT_STREAM(stdout_stream));
         screen->bspc_stdout = g_io_channel_unix_new(stdout_fd);
+        g_io_channel_set_close_on_unref(screen->bspc_stdout, FALSE);
         g_io_channel_set_encoding(screen->bspc_stdout, NULL, NULL);
         g_io_channel_set_flags(screen->bspc_stdout, G_IO_FLAG_NONBLOCK, NULL);
         screen->bspc_watch_id = g_io_add_watch(screen->bspc_stdout,
@@ -245,7 +283,7 @@ xfw_screen_x11_stop_bspc_subscription(XfwScreenX11 *screen) {
 static gboolean
 xfw_screen_x11_bspc_event_callback(GIOChannel *channel, GIOCondition condition, XfwScreenX11 *screen) {
     if (condition & (G_IO_HUP | G_IO_ERR)) {
-        // Connection closed or error, try to restart
+        /* El pipe se cerró o hubo un error; reiniciamos la suscripción. */
         xfw_screen_x11_stop_bspc_subscription(screen);
         xfw_screen_x11_start_bspc_subscription(screen);
         return G_SOURCE_REMOVE;
@@ -258,28 +296,63 @@ xfw_screen_x11_bspc_event_callback(GIOChannel *channel, GIOCondition condition, 
         GIOStatus status = g_io_channel_read_line(channel, &line, &length, NULL, &error);
 
         if (status == G_IO_STATUS_NORMAL && line != NULL) {
-            // Parse bspc event: node_state <xid> hidden on|off or node_flag <xid> hidden on|off
-            gchar **parts = g_strsplit(line, " ", -1);
-            if (g_strv_length(parts) >= 4) {
-                if (g_strcmp0(parts[0], "node_state") == 0 || g_strcmp0(parts[0], "node_flag") == 0) {
-                    if (g_strcmp0(parts[2], "hidden") == 0) {
-                        Window xid = (Window)g_ascii_strtoull(parts[1] + 2, NULL, 16); // Skip "0x"
-                        gboolean hidden = (g_strcmp0(parts[3], "on") == 0);
+            /* FIX #5: g_io_channel_read_line() incluye el terminador '\n' (o
+             * '\r\n') en el string. Sin este g_strchomp(), parts[3] sería
+             * "on\n" o "off\n" y g_strcmp0(parts[3], "on") siempre fallaría,
+             * haciendo que todos los eventos bspc fueran ignorados. */
+            g_strchomp(line);
 
-                        XfwWindowX11 *window = g_hash_table_lookup(screen->xid_windows, GUINT_TO_POINTER(xid));
+            /* Formato del evento bspc subscribe:
+             *   node_state <monitor_id> <desktop_id> <node_id> hidden on|off
+             *   node_flag  <monitor_id> <desktop_id> <node_id> hidden on|off
+             *
+             * Nota: bspc emite los IDs en DECIMAL, no en hexadecimal.
+             * El node_id en bspwm corresponde al Window XID de X11. */
+            gchar **parts = g_strsplit(line, " ", -1);
+            guint n_parts = g_strv_length(parts);
+
+            /* FIX #4 (parsing): bspc subscribe emite 6 tokens:
+             *   parts[0] = "node_state" | "node_flag"
+             *   parts[1] = monitor_id   (decimal)
+             *   parts[2] = desktop_id   (decimal)
+             *   parts[3] = node_id/XID  (decimal)
+             *   parts[4] = "hidden"
+             *   parts[5] = "on" | "off"
+             *
+             * El agente original asumía 4 tokens y XID en parts[1] con
+             * prefijo "0x". El formato real tiene 6 tokens y XID en parts[3]
+             * en decimal. Usamos base 0 en strtoull para ser robustos ante
+             * ambas representaciones (decimal y "0x" hex). */
+            if (n_parts >= 6) {
+                if (g_strcmp0(parts[0], "node_state") == 0 || g_strcmp0(parts[0], "node_flag") == 0) {
+                    if (g_strcmp0(parts[4], "hidden") == 0) {
+                        /* FIX #4: base=0 detecta automáticamente decimal vs
+                         * 0x-prefixed hex; no asumimos ningún formato fijo. */
+                        Window xid = (Window)g_ascii_strtoull(parts[3], NULL, 0);
+                        gboolean hidden = (g_strcmp0(parts[5], "on") == 0);
+
+                        /* FIX #4: GSIZE_TO_POINTER para coincidir con la
+                         * clave usada al insertar en xid_windows. */
+                        XfwWindowX11 *window = g_hash_table_lookup(screen->xid_windows,
+                                                                    GSIZE_TO_POINTER((gsize)xid));
                         if (window != NULL) {
-                            XfwWindowState old_state = window->priv->state;
+                            XfwWindowState old_state = _xfw_window_x11_get_state(window);
                             XfwWindowState new_state = old_state;
+
                             if (hidden) {
                                 new_state |= XFW_WINDOW_STATE_MINIMIZED;
                             } else {
                                 new_state &= ~XFW_WINDOW_STATE_MINIMIZED;
                             }
+
                             XfwWindowState changed_mask = old_state ^ new_state;
                             if (changed_mask != XFW_WINDOW_STATE_NONE) {
-                                window->priv->state = new_state;
-                                g_object_notify(G_OBJECT(window), "state");
-                                g_signal_emit_by_name(window, "state-changed", changed_mask, new_state);
+                                /* Actualizamos el estado a través del accessor
+                                 * privado; no accedemos a ->priv directamente
+                                 * desde este archivo (pertenece a xfw-window-x11.c). */
+                                _xfw_window_x11_set_state(window, new_state);
+                                g_signal_emit_by_name(window, "state-changed",
+                                                      changed_mask, new_state);
                             }
                         }
                     }
@@ -288,17 +361,20 @@ xfw_screen_x11_bspc_event_callback(GIOChannel *channel, GIOCondition condition, 
             g_strfreev(parts);
             g_free(line);
         } else if (status == G_IO_STATUS_EOF) {
-            // EOF, restart subscription
+            /* El proceso bspc terminó; reiniciamos. */
             xfw_screen_x11_stop_bspc_subscription(screen);
             xfw_screen_x11_start_bspc_subscription(screen);
+            return G_SOURCE_REMOVE;
         } else if (error != NULL) {
-            g_warning("Error reading bspc events: %s", error->message);
+            g_warning("xfw-screen-x11: error reading bspc events: %s", error->message);
             g_error_free(error);
         }
     }
 
     return G_SOURCE_CONTINUE;
 }
+
+/* --------------------------------------------------------------------------- */
 
 static void
 xfw_screen_x11_finalize(GObject *obj) {
@@ -318,7 +394,7 @@ xfw_screen_x11_finalize(GObject *obj) {
         g_array_free(screen->workareas, TRUE);
     }
 
-    // to be released last
+    /* to be released last */
     g_object_unref(screen->wnck_screen);
 
     G_OBJECT_CLASS(xfw_screen_x11_parent_class)->finalize(obj);
@@ -355,10 +431,11 @@ window_opened(WnckScreen *wnck_screen, WnckWindow *wnck_window, XfwScreenX11 *sc
 
     Window xid = wnck_window_get_xid(wnck_window);
     if (xid != 0) {
-        g_hash_table_insert(screen->xid_windows, GUINT_TO_POINTER(xid), window);
+        /* FIX #4: GSIZE_TO_POINTER */
+        g_hash_table_insert(screen->xid_windows, GSIZE_TO_POINTER((gsize)xid), window);
     }
 
-    // FIXME: window-stacking-changed signal will fire out of order
+    /* FIXME: window-stacking-changed signal will fire out of order */
     window_stacking_changed(screen->wnck_screen, screen);
     g_signal_emit_by_name(screen, "window-opened", window);
 }
@@ -371,7 +448,8 @@ window_closed(WnckScreen *wnck_screen, WnckWindow *wnck_window, XfwScreenX11 *sc
 
         Window xid = wnck_window_get_xid(wnck_window);
         if (xid != 0) {
-            g_hash_table_remove(screen->xid_windows, GUINT_TO_POINTER(xid));
+            /* FIX #4: GSIZE_TO_POINTER */
+            g_hash_table_remove(screen->xid_windows, GSIZE_TO_POINTER((gsize)xid));
         }
 
         g_hash_table_remove(screen->wnck_windows, wnck_window);
@@ -394,12 +472,24 @@ static void
 active_window_changed(WnckScreen *wnck_screen, WnckWindow *previous_wnck_window, XfwScreenX11 *screen) {
     WnckWindow *wnck_window = wnck_screen_get_active_window(screen->wnck_screen);
     XfwWindow *window = g_hash_table_lookup(screen->wnck_windows, wnck_window);
+
     if (window != xfw_screen_get_active_window(XFW_SCREEN(screen))) {
+        /* FIX #6: el código original emitía "state-changed" directamente sobre
+         * los WnckWindow (objetos de libwnck), pero el panel escucha señales
+         * de XfwWindow (objetos de libxfce4windowing).  Buscamos el XfwWindow
+         * correspondiente en el hash y notificamos sobre él.
+         *
+         * g_object_notify() dispara "notify::state" para que los consumidores
+         * (como el plugin tasklist) puedan re-leer el estado activo/inactivo. */
         if (previous_wnck_window != NULL) {
-            g_signal_emit_by_name(previous_wnck_window, "state-changed", 0, wnck_window_get_state(previous_wnck_window));
+            XfwWindow *previous_xfw_window = g_hash_table_lookup(screen->wnck_windows,
+                                                                  previous_wnck_window);
+            if (previous_xfw_window != NULL) {
+                g_object_notify(G_OBJECT(previous_xfw_window), "state");
+            }
         }
-        if (wnck_window != NULL) {
-            g_signal_emit_by_name(wnck_window, "state-changed", 0, wnck_window_get_state(wnck_window));
+        if (wnck_window != NULL && window != NULL) {
+            g_object_notify(G_OBJECT(window), "state");
         }
 
         _xfw_screen_set_active_window(XFW_SCREEN(screen), window);
