@@ -84,3 +84,6 @@ compile_flags.txt
 tests/xfw-enum-monitors
 tests/xfw-enum-windows
 tests/xfw-monitor-offon
+
+build/
+protocols/wlr-protocols/
