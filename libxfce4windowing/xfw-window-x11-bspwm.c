@@ -62,20 +62,21 @@
  * DEPURACIÓN" más abajo y quita todas las líneas g_printerr().
  * ===========================================================================*/
 
-struct _XfwWindowX11BspwmPrivate {
-    gboolean is_bspwm;
-};
-
-static void xfw_window_x11_bspwm_constructed(GObject *obj);
-static gboolean xfw_window_x11_bspwm_set_minimized(XfwWindow *window, gboolean is_minimized, GError **error);
-static XfwWindowCapabilities xfw_window_x11_bspwm_get_capabilities(XfwWindow *window);
-
+typedef struct _XfwWindowX11BspwmPrivate XfwWindowX11BspwmPrivate;
 struct _XfwWindowX11Bspwm {
     XfwWindowX11 parent_instance;
     XfwWindowX11BspwmPrivate *priv;
 };
 
+struct _XfwWindowX11BspwmPrivate {
+    gboolean is_bspwm;
+};
+
 G_DEFINE_FINAL_TYPE_WITH_PRIVATE(XfwWindowX11Bspwm, xfw_window_x11_bspwm, XFW_TYPE_WINDOW_X11)
+
+static void xfw_window_x11_bspwm_constructed(GObject *obj);
+static gboolean xfw_window_x11_bspwm_set_minimized(XfwWindow *window, gboolean is_minimized, GError **error);
+static XfwWindowCapabilities xfw_window_x11_bspwm_get_capabilities(XfwWindow *window);
 
 static void
 xfw_window_x11_bspwm_class_init(XfwWindowX11BspwmClass *klass) {
