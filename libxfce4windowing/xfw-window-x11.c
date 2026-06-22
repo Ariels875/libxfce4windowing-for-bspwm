@@ -859,5 +859,32 @@ _xfw_window_x11_get_wnck_window(XfwWindowX11 *window) {
     return window->priv->wnck_window;
 }
 
+/* ---------------------------------------------------------------------------
+ * _xfw_window_x11_get_state / _xfw_window_x11_set_state
+ *
+ * Accessors internos (cross-file, no públicos) para que xfw-screen-x11.c
+ * pueda leer y actualizar el estado de una ventana sin acceder directamente
+ * a XfwWindowX11Private (que es opaco fuera de este archivo). Los usa la
+ * suscripción a "bspc subscribe node_state node_flag" para reflejar en
+ * XfwWindow cuando bspwm oculta/muestra un nodo, sin importar qué disparó
+ * ese cambio (nuestro set_minimized, un comando bspc manual, otra app, etc).
+ *
+ * NOTA: _set_state() NO emite la señal "state-changed" — el llamador en
+ * xfw-screen-x11.c ya la emite con su propio changed_mask calculado.
+ * Emitirla también aquí causaría doble notificación.
+ * ---------------------------------------------------------------------------*/
+XfwWindowState
+_xfw_window_x11_get_state(XfwWindowX11 *window) {
+    return window->priv->state;
+}
+
+void
+_xfw_window_x11_set_state(XfwWindowX11 *window, XfwWindowState state) {
+    if (window->priv->state != state) {
+        window->priv->state = state;
+        g_object_notify(G_OBJECT(window), "state");
+    }
+}
+
 #define __XFW_WINDOW_X11_C__
 #include "libxfce4windowing-visibility.c"
