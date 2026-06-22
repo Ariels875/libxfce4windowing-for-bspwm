@@ -46,7 +46,6 @@ struct _XfwWindowX11 {
 WnckWindow *_xfw_window_x11_get_wnck_window(XfwWindowX11 *window);
 
 /* <-- AÑADIDO: Prototipos expuestos para el backend de X11 */
-Window xfw_window_x11_get_xid(XfwWindowX11 *window);
 XfwWindowState _xfw_window_x11_get_state(XfwWindowX11 *window);
 void _xfw_window_x11_set_state(XfwWindowX11 *window, XfwWindowState state);
 

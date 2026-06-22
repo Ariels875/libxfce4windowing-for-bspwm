@@ -31,7 +31,7 @@
 #include "xfw-window-private.h"
 #include "xfw-wnck-icon.h"
 #include "libxfce4windowing-visibility.h"
-
+#include "xfw-x11.h"
 /* ===========================================================================
  * BLOQUE DE DEPURACIÓN TEMPORAL
  * ---------------------------------------------------------------------------
@@ -202,7 +202,7 @@ xfw_window_x11_bspwm_set_minimized(XfwWindow *window, gboolean is_minimized, GEr
      * el problema está más abajo, en run_bspc() o en bspc mismo. */
     g_printerr("[bspwm-debug] >>> set_minimized() llamado, is_minimized=%d\n", is_minimized);
 
-    Window xid = xfw_window_x11_get_xid(XFW_WINDOW_X11(window));
+    Window xid = xfw_window_x11_get_xid(window);
 
     if (xid == 0) {
         g_printerr("[bspwm-debug] XID inválido (0) — wnck_window_get_xid falló\n");
