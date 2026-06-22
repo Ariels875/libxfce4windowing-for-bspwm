@@ -30,8 +30,8 @@
 #include "xfw-window-x11-bspwm.h"
 #include "xfw-window-private.h"
 #include "xfw-wnck-icon.h"
-#include "libxfce4windowing-visibility.h"
 #include "xfw-x11.h"
+#include "libxfce4windowing-visibility.h"
 /* ===========================================================================
  * BLOQUE DE DEPURACIÓN TEMPORAL
  * ---------------------------------------------------------------------------
@@ -72,6 +72,7 @@ static XfwWindowCapabilities xfw_window_x11_bspwm_get_capabilities(XfwWindow *wi
 
 struct _XfwWindowX11Bspwm {
     XfwWindowX11 parent_instance;
+    XfwWindowX11BspwmPrivate *priv;
 };
 
 G_DEFINE_FINAL_TYPE_WITH_PRIVATE(XfwWindowX11Bspwm, xfw_window_x11_bspwm, XFW_TYPE_WINDOW_X11)
