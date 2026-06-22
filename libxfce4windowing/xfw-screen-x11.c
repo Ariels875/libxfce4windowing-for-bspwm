@@ -105,7 +105,7 @@ xfw_screen_x11_init(XfwScreenX11 *screen) {}
 static gboolean
 xfw_screen_x11_detect_bspwm(XfwScreenX11 *xscreen) {
     Display *display = GDK_DISPLAY_XDISPLAY(gdk_screen_get_display(_xfw_screen_get_gdk_screen(XFW_SCREEN(xscreen))));
-    Window root = gdk_x11_screen_get_root_window(_xfw_screen_get_gdk_screen(XFW_SCREEN(xscreen)));
+    Window root = GDK_WINDOW_XID(gdk_screen_get_root_window(_xfw_screen_get_gdk_screen(XFW_SCREEN(xscreen))));
 
     Atom supporting_wm_check = XInternAtom(display, "_NET_SUPPORTING_WM_CHECK", False);
     Atom actual_type;
