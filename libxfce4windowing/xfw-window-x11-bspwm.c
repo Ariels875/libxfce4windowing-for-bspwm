@@ -38,6 +38,7 @@ struct _XfwWindowX11BspwmPrivate {
 
 static void xfw_window_x11_bspwm_constructed(GObject *obj);
 static gboolean xfw_window_x11_bspwm_set_minimized(XfwWindow *window, gboolean is_minimized, GError **error);
+static XfwWindowCapabilities xfw_window_x11_bspwm_get_capabilities(XfwWindow *window);
 
 G_DEFINE_FINAL_TYPE_WITH_PRIVATE(XfwWindowX11Bspwm, xfw_window_x11_bspwm, XFW_TYPE_WINDOW_X11)
 
@@ -48,6 +49,7 @@ xfw_window_x11_bspwm_class_init(XfwWindowX11BspwmClass *klass) {
 
     gklass->constructed = xfw_window_x11_bspwm_constructed;
     window_class->set_minimized = xfw_window_x11_bspwm_set_minimized;
+    window_class->get_capabilities = xfw_window_x11_bspwm_get_capabilities;
 }
 
 static void
@@ -100,6 +102,35 @@ xfw_window_x11_bspwm_run_bspc(GError **error, const gchar *first_arg, ...) {
     /* Fire-and-forget: no esperamos a que el proceso termine */
     g_object_unref(proc);
     return TRUE;
+}
+
+/* ---------------------------------------------------------------------------
+ * get_capabilities — vmethod que sobreescribe XfwWindowClass::get_capabilities
+ *
+ * FIX #4: bspwm nunca anuncia _NET_WM_ACTION_MINIMIZE vía EWMH (no es un
+ * concepto nativo de un WM en mosaico), así que WNCK jamás incluye
+ * WNCK_WINDOW_ACTION_MINIMIZE en wnck_window_get_actions(), y por lo tanto
+ * la implementación base (xfw_window_x11_get_capabilities) NUNCA pone el
+ * bit CAN_MINIMIZE/CAN_UNMINIMIZE, sin importar que set_minimized() esté
+ * bien implementado.
+ *
+ * Como el panel consulta get_capabilities() ANTES de decidir si llama a
+ * set_minimized() (para no ofrecer una acción "no soportada"), el panel
+ * nunca llegaba a invocar nuestro código — por eso el clic solo enfocaba
+ * la ventana (comportamiento por defecto), nunca la minimizaba.
+ *
+ * Encadenamos a la clase padre para conservar el resto de banderas
+ * (CAN_MAXIMIZE, CAN_MOVE, CAN_RESIZE, etc.) y solo forzamos las dos
+ * banderas relacionadas con minimizar, ya que SÍ las soportamos vía bspc.
+ * ---------------------------------------------------------------------------*/
+static XfwWindowCapabilities
+xfw_window_x11_bspwm_get_capabilities(XfwWindow *window) {
+    XfwWindowCapabilities base_caps =
+        XFW_WINDOW_CLASS(xfw_window_x11_bspwm_parent_class)->get_capabilities(window);
+
+    return base_caps
+           | XFW_WINDOW_CAPABILITIES_CAN_MINIMIZE
+           | XFW_WINDOW_CAPABILITIES_CAN_UNMINIMIZE;
 }
 
 /* ---------------------------------------------------------------------------
