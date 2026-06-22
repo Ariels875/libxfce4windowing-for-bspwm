@@ -24,6 +24,7 @@
 #include <X11/X.h>
 #include <gdk/gdkx.h>
 #include <gio/gunixinputstream.h>  /* FIX #1: necesario para g_unix_input_stream_get_fd() */
+#include <X11/Xatom.h>   // Para XA_WINDOW
 #include <libwnck/libwnck.h>
 
 #include "libxfce4windowing-private.h"

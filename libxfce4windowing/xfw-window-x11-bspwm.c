@@ -70,6 +70,10 @@ static void xfw_window_x11_bspwm_constructed(GObject *obj);
 static gboolean xfw_window_x11_bspwm_set_minimized(XfwWindow *window, gboolean is_minimized, GError **error);
 static XfwWindowCapabilities xfw_window_x11_bspwm_get_capabilities(XfwWindow *window);
 
+struct _XfwWindowX11Bspwm {
+    XfwWindowX11 parent_instance;
+};
+
 G_DEFINE_FINAL_TYPE_WITH_PRIVATE(XfwWindowX11Bspwm, xfw_window_x11_bspwm, XFW_TYPE_WINDOW_X11)
 
 static void
@@ -198,8 +202,7 @@ xfw_window_x11_bspwm_set_minimized(XfwWindow *window, gboolean is_minimized, GEr
      * el problema está más abajo, en run_bspc() o en bspc mismo. */
     g_printerr("[bspwm-debug] >>> set_minimized() llamado, is_minimized=%d\n", is_minimized);
 
-    XfwWindowX11Private *priv = XFW_WINDOW_X11(window)->priv;
-    Window xid = wnck_window_get_xid(priv->wnck_window);
+    Window xid = xfw_window_x11_get_xid(XFW_WINDOW_X11(window));
 
     if (xid == 0) {
         g_printerr("[bspwm-debug] XID inválido (0) — wnck_window_get_xid falló\n");
