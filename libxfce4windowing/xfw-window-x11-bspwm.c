@@ -32,6 +32,36 @@
 #include "xfw-wnck-icon.h"
 #include "libxfce4windowing-visibility.h"
 
+/* ===========================================================================
+ * BLOQUE DE DEPURACIÓN TEMPORAL
+ * ---------------------------------------------------------------------------
+ * Todas las líneas marcadas con "[bspwm-debug]" son temporales, solo para
+ * encontrar en qué punto exacto se rompe la cadena de llamadas:
+ *
+ *   panel hace clic -> xfw_window_get_capabilities() -> ¿CAN_MINIMIZE=1?
+ *     -> xfw_window_set_minimized() -> xfw_window_x11_bspwm_set_minimized()
+ *       -> xfw_window_x11_bspwm_run_bspc() -> g_subprocess_newv() -> bspc
+ *
+ * Usa g_printerr() (va directo a stderr, sin buffering) en vez de g_debug()
+ * para que aparezca SIEMPRE, sin depender de variables de entorno como
+ * G_MESSAGES_DEBUG.
+ *
+ * CÓMO VER ESTA SALIDA:
+ * xfce4-panel normalmente no tiene una terminal visible adjunta cuando lo
+ * arranca el autostart de la sesión, así que stderr no se ve en ningún lado
+ * a simple vista. Para depurar:
+ *
+ *   1. Mata el panel actual:      pkill -x xfce4-panel
+ *   2. Lánzalo a mano, en una terminal, SIN segundo plano:
+ *        xfce4-panel
+ *      (déjalo corriendo en esa terminal, no le pongas &)
+ *   3. Haz clic en minimizar/restaurar desde el panel
+ *   4. Mira lo que imprime esa misma terminal
+ *
+ * Cuando termines de depurar, busca el comentario "FIN DEL BLOQUE DE
+ * DEPURACIÓN" más abajo y quita todas las líneas g_printerr().
+ * ===========================================================================*/
+
 struct _XfwWindowX11BspwmPrivate {
     gboolean is_bspwm;
 };
@@ -65,6 +95,15 @@ xfw_window_x11_bspwm_constructed(GObject *obj) {
 
     window->priv->is_bspwm = _xfw_screen_x11_is_bspwm(xscreen);
 
+    /* [bspwm-debug] Confirma que ESTA subclase realmente se está
+     * instanciando, y qué devolvió la detección de bspwm. Si esta línea
+     * NUNCA aparece en la terminal, el problema es anterior a todo lo que
+     * hemos tocado: la fábrica de tipos en xfw-screen-x11.c no está
+     * eligiendo XfwWindowX11Bspwm en absoluto, y nada de lo que hagamos
+     * en este archivo puede importar. */
+    g_printerr("[bspwm-debug] constructed() llamado. is_bspwm=%d\n",
+               window->priv->is_bspwm);
+
     G_OBJECT_CLASS(xfw_window_x11_bspwm_parent_class)->constructed(obj);
 }
 
@@ -89,15 +128,34 @@ xfw_window_x11_bspwm_run_bspc(GError **error, const gchar *first_arg, ...) {
 
     g_ptr_array_add(argv, NULL);  /* terminador requerido por execvp */
 
+    /* [bspwm-debug] Imprime el comando EXACTO que se va a ejecutar, tal
+     * como queda construido en argv, token por token (así detectamos de
+     * inmediato cualquier problema de formato/espacios/comillas). */
+    {
+        GString *cmd_repr = g_string_new("[bspwm-debug] argv ->");
+        for (guint i = 0; i < argv->len - 1; i++) {
+            g_string_append_printf(cmd_repr, " [%s]", (const gchar *)argv->pdata[i]);
+        }
+        g_printerr("%s\n", cmd_repr->str);
+        g_string_free(cmd_repr, TRUE);
+    }
+
+    /* [bspwm-debug] YA NO silenciamos stdout/stderr del subproceso.
+     * G_SUBPROCESS_FLAGS_NONE hereda los descriptores del proceso padre
+     * (xfce4-panel), así que cualquier cosa que bspc imprima en stdout o
+     * stderr aparecerá en la terminal donde lanzaste xfce4-panel a mano. */
     GSubprocess *proc = g_subprocess_newv((const gchar *const *)argv->pdata,
-                                          G_SUBPROCESS_FLAGS_STDOUT_SILENCE |
-                                          G_SUBPROCESS_FLAGS_STDERR_SILENCE,
+                                          G_SUBPROCESS_FLAGS_NONE,
                                           error);
     g_ptr_array_free(argv, TRUE);
 
     if (proc == NULL) {
+        g_printerr("[bspwm-debug] g_subprocess_newv() FALLÓ AL LANZAR: %s\n",
+                   (error != NULL && *error != NULL) ? (*error)->message : "(sin mensaje de error)");
         return FALSE;
     }
+
+    g_printerr("[bspwm-debug] subproceso bspc lanzado correctamente (fire-and-forget)\n");
 
     /* Fire-and-forget: no esperamos a que el proceso termine */
     g_object_unref(proc);
@@ -106,31 +164,26 @@ xfw_window_x11_bspwm_run_bspc(GError **error, const gchar *first_arg, ...) {
 
 /* ---------------------------------------------------------------------------
  * get_capabilities — vmethod que sobreescribe XfwWindowClass::get_capabilities
- *
- * FIX #4: bspwm nunca anuncia _NET_WM_ACTION_MINIMIZE vía EWMH (no es un
- * concepto nativo de un WM en mosaico), así que WNCK jamás incluye
- * WNCK_WINDOW_ACTION_MINIMIZE en wnck_window_get_actions(), y por lo tanto
- * la implementación base (xfw_window_x11_get_capabilities) NUNCA pone el
- * bit CAN_MINIMIZE/CAN_UNMINIMIZE, sin importar que set_minimized() esté
- * bien implementado.
- *
- * Como el panel consulta get_capabilities() ANTES de decidir si llama a
- * set_minimized() (para no ofrecer una acción "no soportada"), el panel
- * nunca llegaba a invocar nuestro código — por eso el clic solo enfocaba
- * la ventana (comportamiento por defecto), nunca la minimizaba.
- *
- * Encadenamos a la clase padre para conservar el resto de banderas
- * (CAN_MAXIMIZE, CAN_MOVE, CAN_RESIZE, etc.) y solo forzamos las dos
- * banderas relacionadas con minimizar, ya que SÍ las soportamos vía bspc.
  * ---------------------------------------------------------------------------*/
 static XfwWindowCapabilities
 xfw_window_x11_bspwm_get_capabilities(XfwWindow *window) {
     XfwWindowCapabilities base_caps =
         XFW_WINDOW_CLASS(xfw_window_x11_bspwm_parent_class)->get_capabilities(window);
 
-    return base_caps
-           | XFW_WINDOW_CAPABILITIES_CAN_MINIMIZE
-           | XFW_WINDOW_CAPABILITIES_CAN_UNMINIMIZE;
+    XfwWindowCapabilities final_caps = base_caps
+                                        | XFW_WINDOW_CAPABILITIES_CAN_MINIMIZE
+                                        | XFW_WINDOW_CAPABILITIES_CAN_UNMINIMIZE;
+
+    /* [bspwm-debug] Si esta línea NUNCA aparece al hacer clic, el panel
+     * no está consultando capacidades en absoluto antes de actuar (otra
+     * posible explicación distinta a la que descartamos), o simplemente
+     * esta vmethod tampoco se está enlazando correctamente. */
+    g_printerr("[bspwm-debug] get_capabilities() llamado. base=0x%x final=0x%x (CAN_MINIMIZE=%d, CAN_UNMINIMIZE=%d)\n",
+               base_caps, final_caps,
+               (final_caps & XFW_WINDOW_CAPABILITIES_CAN_MINIMIZE) != 0,
+               (final_caps & XFW_WINDOW_CAPABILITIES_CAN_UNMINIMIZE) != 0);
+
+    return final_caps;
 }
 
 /* ---------------------------------------------------------------------------
@@ -138,10 +191,18 @@ xfw_window_x11_bspwm_get_capabilities(XfwWindow *window) {
  * ---------------------------------------------------------------------------*/
 static gboolean
 xfw_window_x11_bspwm_set_minimized(XfwWindow *window, gboolean is_minimized, GError **error) {
+    /* [bspwm-debug] Si esta línea NUNCA aparece al hacer clic en
+     * minimizar/restaurar, confirmamos que el panel JAMÁS llega a llamar
+     * esta función — el bloqueo está en otro lado (capacidades, tipo de
+     * objeto instanciado, o el propio plugin de panel). Si SÍ aparece,
+     * el problema está más abajo, en run_bspc() o en bspc mismo. */
+    g_printerr("[bspwm-debug] >>> set_minimized() llamado, is_minimized=%d\n", is_minimized);
+
     XfwWindowX11Private *priv = XFW_WINDOW_X11(window)->priv;
     Window xid = wnck_window_get_xid(priv->wnck_window);
 
     if (xid == 0) {
+        g_printerr("[bspwm-debug] XID inválido (0) — wnck_window_get_xid falló\n");
         g_set_error_literal(error, XFW_ERROR, XFW_ERROR_INTERNAL,
                             "Invalid window XID");
         return FALSE;
@@ -150,28 +211,50 @@ xfw_window_x11_bspwm_set_minimized(XfwWindow *window, gboolean is_minimized, GEr
     /* Representación del XID como string para el argv de bspc. */
     gchar xid_str[32];
     g_snprintf(xid_str, sizeof(xid_str), "0x%lx", (unsigned long)xid);
+    g_printerr("[bspwm-debug] XID resuelto: %s\n", xid_str);
 
     if (is_minimized) {
         /* Minimizar: bspc node <xid> -g hidden=on */
-        return xfw_window_x11_bspwm_run_bspc(error,
-                                              "node", xid_str, "-g", "hidden=on",
-                                              NULL);
+        gboolean ok = xfw_window_x11_bspwm_run_bspc(error,
+                                                      "node", xid_str, "-g", "hidden=on",
+                                                      NULL);
+        g_printerr("[bspwm-debug] resultado de minimizar: %s\n", ok ? "OK" : "FALLÓ");
+        return ok;
     } else {
-        /* Restaurar: dos comandos independientes sin depender de un shell. */
-        GError *local_error = NULL;
+        /* Restaurar.
+         *
+         * CAMBIO respecto a la versión anterior: añadimos el calificador
+         * ".hidden" al selector para el primer comando. Por defecto, los
+         * selectores de bspc EXCLUYEN nodos ocultos al buscar coincidencias
+         * — si el nodo ya está hidden=on, un selector "pelado" (solo el
+         * XID) probablemente no lo encuentra. ".hidden" le dice a bspc
+         * "sí, busca también entre los nodos ocultos".
+         *
+         * También reemplazamos el selector "." (no confirmado como válido
+         * en la gramática de bspc) por el XID explícito que ya tenemos. */
+        gchar hidden_selector[40];
+        g_snprintf(hidden_selector, sizeof(hidden_selector), "%s.hidden", xid_str);
+        g_printerr("[bspwm-debug] selector con calificador .hidden: %s\n", hidden_selector);
 
-        if (!xfw_window_x11_bspwm_run_bspc(&local_error,
-                                             "node", xid_str, "-g", "hidden=off",
-                                             NULL)) {
+        GError *local_error = NULL;
+        gboolean ok1 = xfw_window_x11_bspwm_run_bspc(&local_error,
+                                                       "node", hidden_selector, "-g", "hidden=off",
+                                                       NULL);
+        g_printerr("[bspwm-debug] resultado de hidden=off: %s\n", ok1 ? "OK" : "FALLÓ");
+
+        if (!ok1) {
             g_propagate_error(error, local_error);
             return FALSE;
         }
 
-        return xfw_window_x11_bspwm_run_bspc(error,
-                                              "node", xid_str, "-f", ".",
-                                              NULL);
+        gboolean ok2 = xfw_window_x11_bspwm_run_bspc(error,
+                                                       "node", xid_str, "-f", xid_str,
+                                                       NULL);
+        g_printerr("[bspwm-debug] resultado de focus: %s\n", ok2 ? "OK" : "FALLÓ");
+        return ok2;
     }
 }
+/* ======================= FIN DEL BLOQUE DE DEPURACIÓN ===================== */
 
 #define __XFW_WINDOW_X11_BSPWM_C__
 #include "libxfce4windowing-visibility.c"
